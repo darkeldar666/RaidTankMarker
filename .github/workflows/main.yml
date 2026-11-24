@@ -1,0 +1,129 @@
+name: Create Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: addon-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      contains(github.event.head_commit.message, '[Release]') ||
+      contains(github.event.head_commit.message, '[Release:Patch]') ||
+      contains(github.event.head_commit.message, '[Release:Minor]') ||
+      contains(github.event.head_commit.message, '[Release:Major]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update version
+        id: version
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          TOC_FILES=(*.toc)
+          if [ "${#TOC_FILES[@]}" -ne 1 ]; then
+            echo "Expected exactly one TOC file."
+            exit 1
+          fi
+          TOC_FILE="${TOC_FILES[0]}"
+          ADDON_NAME="${TOC_FILE%.toc}"
+          OLD_VERSION=$(sed -nE \
+            's/^## Version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' \
+            "$TOC_FILE")
+          if [[ ! "$OLD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $OLD_VERSION"
+            exit 1
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VERSION"
+          case "$COMMIT_MESSAGE" in
+            *"[Release:Major]"*)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            *"[Release:Minor]"*)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            *)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          TAG="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists."
+            exit 1
+          fi
+          sed -i -E \
+            "s/^## Version:.*/## Version: $VERSION/" \
+            "$TOC_FILE"
+          echo "Old version: $OLD_VERSION"
+          echo "New version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "addon=$ADDON_NAME" >> "$GITHUB_OUTPUT"
+          echo "toc=$TOC_FILE" >> "$GITHUB_OUTPUT"
+      - name: Commit version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TOC_FILE: ${{ steps.version.outputs.toc }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$TOC_FILE"
+          git commit -m "Bump version to $VERSION"
+      - name: Create ZIP package
+        id: package
+        env:
+          ADDON_NAME: ${{ steps.version.outputs.addon }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ZIP_FILE="${ADDON_NAME}-${VERSION}.zip"
+          mkdir -p dist
+          git archive \
+            --format=zip \
+            --prefix="${ADDON_NAME}/" \
+            --output="dist/${ZIP_FILE}" \
+            HEAD
+          zip -d "dist/${ZIP_FILE}" \
+            "${ADDON_NAME}/.github/*" \
+            "${ADDON_NAME}/.gitignore" \
+            "${ADDON_NAME}/.gitattributes" \
+            || test "$?" -eq 12
+          echo "file=dist/${ZIP_FILE}" >> "$GITHUB_OUTPUT"
+      - name: Push version and tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          git push --atomic origin \
+            HEAD:refs/heads/main \
+            "refs/tags/$TAG"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ADDON_NAME: ${{ steps.version.outputs.addon }}
+          ZIP_FILE: ${{ steps.package.outputs.file }}
+        run: |
+          gh release create "$TAG" "$ZIP_FILE" \
+            --verify-tag \
+            --title "$ADDON_NAME $VERSION" \
+            --generate-notes
