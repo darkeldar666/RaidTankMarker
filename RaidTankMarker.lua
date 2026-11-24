@@ -5,6 +5,13 @@ local addon = CreateFrame("Frame")
 local marker
 local groupIndicator
 local testOverlay
+local selfMarkButton
+local QueueUpdate
+local priority = {6, 5, 4, 3, 2, 7, 1, 8}
+RaidTankMarkerDB = RaidTankMarkerDB or {}
+if type(RaidTankMarkerDB.selfmark) ~= "boolean" then
+    RaidTankMarkerDB.selfmark = false
+end
 
 local function FindGroupIndicator()
     if not PlayerFrame then
@@ -93,33 +100,74 @@ local function HideTestOverlay()
     end
 end
 
-local function GetTankMarker(subgroup)
-    local foundTank
-    local count = GetNumGroupMembers()
 
-    for raidIndex = 1, count do
-        local _, _, memberSubgroup, _, _, _, _, _, _, _, _, rosterRole = GetRaidRosterInfo(raidIndex)
-        if memberSubgroup == subgroup then
-            local unit = "raid" .. raidIndex
-            local assignedRole = UnitGroupRolesAssigned(unit)
-            if assignedRole == "TANK" or rosterRole == "TANK" then
-                -- An ambiguous group (more than one tank) is ignored.
-                if foundTank then
-                    return nil, false
-                end
-                foundTank = unit
-            end
+local function FindTankIndex(subgroup)
+    local tank
+    for i = 1, GetNumGroupMembers() do
+        local _, _, group, _, _, _, _, _, _, _, _, role = GetRaidRosterInfo(i)
+        if group == subgroup and role == "TANK" then
+            if tank then return nil end
+            tank = i
         end
     end
+    return tank
+end
 
-    if not foundTank then
-        return nil, false
+local function GetTankMarker(subgroup)
+    local tank = FindTankIndex(subgroup)
+    if not tank then return nil, false end
+    return GetRaidTargetIndex("raid" .. tank), true
+end
+
+local function PreferredFreeMarker()
+    local used = {}
+    for i = 1, GetNumGroupMembers() do
+        local value = GetRaidTargetIndex("raid" .. i)
+        if value then
+            if issecretvalue(value) then return nil end
+            used[value] = true
+        end
     end
+    for _, value in ipairs(priority) do
+        if not used[value] then return value end
+    end
+end
 
-    return GetRaidTargetIndex(foundTank), true
+local function SelfMarkUpdate()
+    if InCombatLockdown() then return end
+    local chosen
+    if RaidTankMarkerDB.selfmark and IsInRaid() then
+        local me = UnitInRaid("player")
+        local t1, t2 = FindTankIndex(1), FindTankIndex(2)
+        if me and t1 and t2 and (me == t1 or me == t2) and
+           not GetRaidTargetIndex("player") then
+            chosen = PreferredFreeMarker()
+        end
+    end
+    if not chosen then
+        if selfMarkButton then selfMarkButton:Hide() end
+        return
+    end
+    if not selfMarkButton then
+        selfMarkButton = CreateFrame("Button", "RaidTankMarkerSelfMarkButton",
+            UIParent, "SecureActionButtonTemplate,UIPanelButtonTemplate")
+        selfMarkButton:SetSize(130, 22)
+        selfMarkButton:SetPoint("TOPLEFT", PlayerFrame, "TOPRIGHT", 0, -8)
+        selfMarkButton:RegisterForClicks("AnyUp")
+        selfMarkButton:SetAttribute("type", "raidtarget")
+        selfMarkButton:SetAttribute("unit", "player")
+        selfMarkButton:SetAttribute("action", "set-unmarked")
+        selfMarkButton:SetScript("PostClick", function()
+            C_Timer.After(0.2, QueueUpdate)
+        end)
+    end
+    selfMarkButton:SetAttribute("marker", chosen)
+    selfMarkButton:SetText("Mark " .. chosen .. " setzen")
+    selfMarkButton:Show()
 end
 
 local function Update()
+    SelfMarkUpdate()
     HideTestOverlay()
     if not EnsureMarker() then
         return
@@ -156,7 +204,7 @@ local function Update()
     end
 end
 
-local function QueueUpdate()
+QueueUpdate = function()
     -- Roster/role information may settle after the event itself.
     if addon.pending then
         return
@@ -174,10 +222,21 @@ addon:RegisterEvent("RAID_ROSTER_UPDATE")
 addon:RegisterEvent("PLAYER_ROLES_ASSIGNED")
 addon:RegisterEvent("ROLE_CHANGED_INFORM")
 addon:RegisterEvent("RAID_TARGET_UPDATE")
+addon:RegisterEvent("PLAYER_REGEN_ENABLED")
 addon:SetScript("OnEvent", QueueUpdate)
 
 SLASH_RAIDTANKMARKER1 = "/rtm"
 SlashCmdList.RAIDTANKMARKER = function(command)
+    command = (command or ""):lower():match("^%s*(.-)%s*$")
+    if command == "switch +selfmark" or command == "switch -selfmark" then
+        RaidTankMarkerDB.selfmark = command == "switch +selfmark"
+        print("RaidTankMarker: selfmark " .. (RaidTankMarkerDB.selfmark and "AN (Klick erforderlich)" or "AUS"))
+        QueueUpdate()
+        return
+    elseif command == "switch" then
+        print("RaidTankMarker: selfmark ist " .. (RaidTankMarkerDB.selfmark and "AN" or "AUS"))
+        return
+    end
     if command == "test" then
         local index = GetRaidTargetIndex("player")
         if not index then
