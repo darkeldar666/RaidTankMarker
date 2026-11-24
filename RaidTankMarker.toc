@@ -2,5 +2,5 @@
 ## Title: Raid Tank Marker
 ## Notes: Shows the assigned tank's raid marker next to your raid group label on the default player frame.
 ## Author: Custom
-## Version: 1.0.0
+## Version: 1.0.1
 RaidTankMarker.lua
